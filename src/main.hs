@@ -53,9 +53,15 @@ isInside (V2 x y) = (0 < x && x < 640) && (0 < y && y < 480)
 
 create :: Creature -> Alife
 create Plant     = Alife (V2 320 240) 0  20 20 Plant      1 0 Idle   100
-create Herbivore = Alife (V2 320 240) 0  50 50 Herbivore  1 0 Idle    50
-create Carnivore = Alife (V2 320 240) 0  50 50 Carnivore  1 0 Idle   100
+create Herbivore = Alife (V2 320 240) 0  50 50 Herbivore  1 0 Idle   100
+create Carnivore = Alife (V2 320 240) 0  60 60 Carnivore  1 0 Idle   100
 create Human     = Alife (V2 320 240) 0  25 25 Human      1 0 Idle   100
+
+eatBy :: Creature -> [Creature]
+eatBy Plant = []
+eatBy Herbivore = [Plant]
+eatBy Carnivore = [Herbivore, Human]
+eatBy Human = [Plant, Herbivore]
 
 spawn :: Alife -> StateT World (System s) ()
 spawn ai = lives %= consMap' ai
@@ -72,6 +78,7 @@ evolve j = do
   x <- getAI j
   evolve' j (x^.creature)
   zoom (lives . ix j) runAI
+  eat j
 
   where
   runAI = do
@@ -86,11 +93,20 @@ evolve j = do
     whenM (use life <&> (< 0)) $ condition .= Dead
     life -= 0.1
 
+  eat i = do
+    x <- getAI i
+    when (x^.condition == Hungry) $ do
+      xs <- use lives <&> M.assocs . M.filterWithKey (\k a -> k /= j && a^.creature `elem` eatBy (x^.creature) && distance (a^.pos) (x^.pos) < 10)
+      forM_ xs $ \(iy,y) -> do
+        lives . ix i . life += (fromIntegral $ y^.strength) / 10
+        lives . ix iy . life -= (fromIntegral $ x^.strength)
+
   getAI i = use lives <&> (^?! ix i)
 
   evolve' i Plant = do
     x <- getAI i
-    when (x ^. counter `mod` 150 == 0) $ do
+    plants <- use lives <&> M.filter (\a -> a ^. creature == Plant)
+    when (x ^. counter `mod` 150 == 0 && M.size plants < 300) $ do
       p <- randomVec2
       spawn (create Plant & pos .~ p & destination .~ p)
 
@@ -107,17 +123,34 @@ evolve j = do
             destination .= 0
       Hungry -> do
         when ((x ^. counter) `mod` 10 == 0) $ do
-          ys <- use lives <&> sortBy (comparing (\y -> qd (y^.pos) (x^.pos))) . M.elems . M.filter (\a -> (a ^. life > 20) && (a ^. creature == Plant))
+          ys <- use lives <&> sortBy (comparing (\y -> qd (y^.pos) (x^.pos))) . M.elems . M.filter (\a -> (a ^. life > 20) && (a ^. creature `elem` eatBy (x^.creature)))
           when (ys /= []) $ lives . ix i . destination .= (head ys^.pos)
-
-        ls <- use lives <&> M.assocs . M.filterWithKey (\k _ -> k /= i) . M.filter (\a -> a^.creature == Plant && distance (a^.pos) (x^.pos) < 10)
-        forM_ ls $ \(iy,_) -> do
-          lives . ix i . life += 5
-          lives . ix iy . life -= (fromIntegral $ x^.strength)
 
         when (x ^. life > 80) $ do
           lives . ix i . life -= 50
           spawn (create Herbivore & pos .~ (x^.pos))
+        zoom (lives . ix i) $ when (x ^. life > 80) $ condition .= Idle
+        when (x ^. destination /= 0) $ canvas %= cons (color (V4 0.9 0.9 0 1) $ line [x^.destination, x^.pos])
+      _ -> return ()
+  evolve' i Carnivore = do
+    x <- getAI i
+    case x ^. condition of
+      Idle -> do
+        p <- randomVec2
+        zoom (lives . ix i) $ do
+          whenM ((use counter <&> (\t -> t `mod` 200 == 0)) <||> (use pos <&> not . isInside) <||> ((distance <$> use pos <*> use destination) <&> (< 10))) $ do
+            destination .= p
+          when (x ^. life < 60) $ do
+            condition .= Hungry
+            destination .= 0
+      Hungry -> do
+        when ((x ^. counter) `mod` 1 == 0) $ do
+          ys <- use lives <&> sortBy (comparing (\y -> qd (y^.pos) (x^.pos))) . M.elems . M.filter (\a -> (a ^. life > 20) && (a ^. creature `elem` (eatBy $ x^.creature)))
+          when (ys /= []) $ lives . ix i . destination .= (head ys^.pos)
+
+        when (x ^. life > 80) $ do
+          lives . ix i . life -= 50
+          spawn (create Carnivore & pos .~ (x^.pos))
         zoom (lives . ix i) $ when (x ^. life > 80) $ condition .= Idle
         when (x ^. destination /= 0) $ canvas %= cons (color (V4 0.9 0.9 0 1) $ line [x^.destination, x^.pos])
       _ -> return ()
@@ -133,14 +166,19 @@ main = void $ runSystemDefault $ do
   seed' <- liftIO $ save =<< createSystemRandom
   sim <- new $ variable $ World M.empty [] seed'
 
-  replicateM_ 5 $ do
+  replicateM_ 100 $ do
     sim .- do
       p <- randomVec2
       spawn (create Plant & pos .~ p & destination .~ p)
-  sim .- spawn (create Herbivore)
+  replicateM_ 20 $ do
+    sim .- do
+      p <- randomVec2
+      spawn (create Herbivore & pos .~ p & destination .~ p)
+  replicateM_ 1 $ do
+    sim .- do
+      p <- randomVec2
+      spawn (create Carnivore & pos .~ p & destination .~ p)
 
---  sim .- lives %= consMap' (create Herbivore)
---  sim .- lives %= consMap' (create Carnivore)
 --  sim .- lives %= consMap' (create Human)
 
   linkPicture $ \_ -> do
