@@ -1,6 +1,7 @@
 {-# LANGUAGE GADTs, TemplateHaskell, FlexibleContexts, MultiWayIf #-}
 import Call
 import Call.Util.Text as Text
+import qualified Data.BoundingBox as Box
 import Control.Lens
 import Control.Monad.State.Strict
 import Control.Monad.Trans.Maybe
@@ -8,6 +9,9 @@ import qualified Data.IntMap.Strict as M
 import Data.Ord (comparing)
 import Data.List (sortBy)
 import System.Random.MWC hiding (create)
+
+window :: V2 Float
+window = V2 640 480
 
 consMap :: a -> M.IntMap a -> (Int, M.IntMap a)
 consMap x m
@@ -60,9 +64,9 @@ makeLenses ''World
 getInside :: Vec2 -> Vec2
 getInside (V2 x y)
   | x < 0 = getInside $ V2 5 y
-  | x > 640 = getInside $ V2 635 y
+  | x > (window^._x) = getInside $ V2 (window^._x - 5) y
   | y < 0 = getInside $ V2 x 5
-  | y > 480 = getInside $ V2 x 475
+  | y > (window^._y) = getInside $ V2 x (window^._y - 5)
   | otherwise = V2 x y
 
 create :: Creature -> Alife
@@ -88,9 +92,9 @@ spawn :: Alife -> StateT World (System s) ()
 spawn ai = do
   ps <- use lives <&> M.elems
   case ai^.creature of
-    Plant -> when ((< 500) $ length $ filter (\a -> a^.creature == Plant) ps) $ lives %= consMap' ai
-    Herbivore -> when ((< 100) $ length $ filter (\a -> a^.creature == Herbivore) ps) $ lives %= consMap' ai
-    Carnivore -> when ((< 20) $ length $ filter (\a -> a^.creature == Carnivore) ps) $ lives %= consMap' ai
+    Plant -> when ((< 1000) $ length $ filter (\a -> a^.creature == Plant) ps) $ lives %= consMap' ai
+    Herbivore -> when ((< 200) $ length $ filter (\a -> a^.creature == Herbivore) ps) $ lives %= consMap' ai
+    Carnivore -> when ((< 50) $ length $ filter (\a -> a^.creature == Carnivore) ps) $ lives %= consMap' ai
 
 randomVec2 :: (Functor m, MonadIO m, Variate a) => (a,a) -> StateT World m a
 randomVec2 r = do
@@ -113,17 +117,17 @@ evolve j = do
     arg .= (atan2 py px) `approx` ((2 * pi) * 15 / 360)
     
     when (x^.agility > 20 && norm (V2 px py) > 10) $ do
-      let f = \x -> x / 150 + 1
+      let f = \x -> x / 300 + 1
       let q = \x -> sqrt x / 150 + 1
-      let hunting = if x^.condition == Hunting then 1.5 else 1.0
+      let hunting = if x^.condition == Hunting then 1.2 else 1.0
       pos += (fromIntegral (x^.agility) / 20 * f (100 - x^.life) / 2 / q (fromIntegral $ x^.counter)) *^ V2 (cos $ x^.arg) (sin $ x^.arg)
     when (x^.life < 0) $ condition .= Dead
-    life -= fromIntegral (x^.strength) / 500 + fromIntegral (x^.agility) / 500
+    life -= fromIntegral (x^.strength) / 1000 + fromIntegral (x^.agility) / 1000
     counter += 1
 
   eat i = do
     x <- getAI i
-    xs <- use lives <&> M.assocs . M.filterWithKey (\k a -> k /= j && a^.creature `elem` eatBy (x^.creature) && distance (a^.pos) (x^.pos) < 20 && a^.life > 0)
+    xs <- use lives <&> M.assocs . M.filterWithKey (\k a -> k /= j && a^.creature `elem` eatBy (x^.creature) && distance (a^.pos) (x^.pos) < 10 && a^.life > 0)
     forM_ (take 1 xs) $ \(iy,y) -> do
       lives . ix i . life += (fromIntegral $ y^.strength)^2 / 200
       lives . ix i . life %= min 100
@@ -151,15 +155,14 @@ evolve j = do
     es' <- searchIn i d es
     when (es' /= []) $ do
       lives . ix i . destination .= (getInside $ sum $ fmap (\e -> let d = x^.pos - e^.pos in (quadrance d) *^ d) es')
-      lives . ix i . condition .= Idle
 
   getAI i = use lives <&> (^?! ix i)
 
   evolve' i Plant = do
     x <- getAI i
     plants <- use lives <&> M.filter (\a -> a ^. creature == Plant && distance (a^.pos) (x^.pos) < 100)
-    when (x ^. counter `mod` 150 == 0 && M.size plants < 15) $ replicateM_ 3 $ do
-      p <- randomVec2 (x^.pos - 40, x^.pos + 40)
+    when (x ^. counter `mod` 150 == 0 && M.size plants < 10) $ replicateM_ 3 $ do
+      p <- randomVec2 (x^.pos - 30, x^.pos + 30)
       spawn (create Plant & pos .~ p & destination .~ p)
 
   evolve' i Herbivore = do
@@ -167,33 +170,33 @@ evolve j = do
     whenM (eat i) $ do
       if
        | x^.condition == Idle || x^.condition == Hunting -> do
-         xs <- searchIn i 120 (eatBy $ x^.creature)
+         xs <- searchIn i 80 (eatBy $ x^.creature)
          ys <- searchIn i 20 (eatBy $ x^.creature)
-         zs <- searchIn i 10 (eatBy $ x^.creature)
+         zs <- searchIn i 5 (eatBy $ x^.creature)
          unless (zs /= []) $ do
            if
              | ys /= [] -> lives . ix i . destination .= (head ys ^. pos)
              | x^.life < 50 && xs /= [] -> lives . ix i . destination .= (head xs ^. pos)
              | x^.life > 80
                && (200 < x^.counter)
-               && x^.counter `mod` 400 == 0 -> do
-                 spawn (create (x^.creature) & pos .~ (x^.pos))
+               && x^.counter `mod` 300 == 0 -> spawn (create (x^.creature) & pos .~ (x^.pos))
              | otherwise -> do
                  randomWalk i
 
-         runAwayFrom i 80 [Carnivore]
+         runAwayFrom i 40 [Carnivore]
        
        | x^.condition == Dead -> replicateM_ (floor $ fromIntegral (x^.strength) / 10) $ do
-         spawn (create Plant & pos .~ (x^.pos) & destination .~ (x^.pos))
+         p <- randomVec2 (x^.pos - 40, x^.pos + 40)
+         spawn (create Plant & pos .~ p & destination .~ p)
 
   evolve' i Carnivore = do
     x <- getAI i
     whenM (eat i) $ do
       if
        | x^.condition == Idle || x^.condition == Hunting -> do
-          xs <- searchIn i 90 (eatBy $ x^.creature)
+          xs <- searchIn i 30 (eatBy $ x^.creature)
           ys <- searchIn i 20 (eatBy $ x^.creature)
-          zs <- searchIn i 10 (eatBy $ x^.creature)
+          zs <- searchIn i 5 (eatBy $ x^.creature)
           unless (zs /= []) $ do
             if
               | ys /= [] -> lives . ix i . destination .= (head ys ^. pos)
@@ -202,14 +205,15 @@ evolve j = do
                   lives . ix i . destination .= (head xs ^. pos)
               | x^.life > 80
                 && (200 < x^.counter)
-                && x^.counter `mod` 200 == 0 -> do
+                && x^.counter `mod` 300 == 0 -> do
                   lives . ix i . condition .= Idle
                   spawn (create (x^.creature) & pos .~ (x^.pos))
               | otherwise -> do
                   lives . ix i . condition .= Idle
                   randomWalk i
        | x^.condition == Dead -> replicateM_ (floor $ fromIntegral (x^.strength) / 10) $ do
-          spawn (create Plant & pos .~ (x^.pos) & destination .~ (x^.pos))
+         p <- randomVec2 (x^.pos - 40, x^.pos + 40)
+         spawn (create Plant & pos .~ p & destination .~ p)
 
   evolve' _ _ = return ()
 
@@ -217,6 +221,7 @@ main :: IO ()
 main = void $ runSystemDefault $ do
   setTitle "hakoniwa"
   setFPS 30
+  setBoundingBox $ Box.Box 0 window
   renderText <- Text.simple defaultFont 15
 
   seed' <- liftIO $ save =<< createSystemRandom
@@ -224,15 +229,15 @@ main = void $ runSystemDefault $ do
 
   replicateM_ 100 $ do
     sim .- do
-      p <- randomVec2 (V2 0 0, V2 640 480)
+      p <- randomVec2 (V2 0 0, window)
       spawn (create Plant & pos .~ p & destination .~ p)
-  replicateM_ 20 $ do
+  replicateM_ 40 $ do
     sim .- do
-      p <- randomVec2 (V2 0 0, V2 640 480)
+      p <- randomVec2 (V2 0 0, window)
       spawn (create Herbivore & pos .~ p & destination .~ p)
   replicateM_ 5 $ do
     sim .- do
-      p <- randomVec2 (V2 0 0, V2 640 480)
+      p <- randomVec2 (V2 0 0, window)
       spawn (create Carnivore & pos .~ p & destination .~ p)
 
   linkPicture $ \_ -> do

@@ -22,6 +22,7 @@ executable Hakoniwa
   -- other-extensions:    
   build-depends:       base >=4.7 && <4.8
                      , call >=0.1 && <0.2
+                     , boundingboxes ==0.2.*
                      , lens >=4 && <5
                      , mtl ==2.*
                      , transformers ==0.4.*
