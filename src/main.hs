@@ -31,7 +31,7 @@ instance (Variate a) => Variate (V2 a) where
     y <- uniformR (b,d) m
     return $ V2 x y
 
-data Creature = Plant | Herbivore | Carnivore | Human deriving (Eq, Show)
+data Creature = Plant | Herbivore | Carnivore deriving (Eq, Ord, Show)
 data Condition = Idle | Hunting | Dead deriving (Eq, Show)
 
 data Alife = Alife {
@@ -55,7 +55,9 @@ data World = World {
   _lives :: M.IntMap Alife,
   _canvas :: [Picture],
   _seed :: Seed,
-  _cursor :: Maybe Int
+  _cursor :: Maybe Int,
+  _spratio :: [(Int,Int,Int)],
+  _globalCounter :: Int
   }
 
 makeLenses ''Alife
@@ -74,7 +76,6 @@ create u = case u of
   Plant -> plain & creature .~ Plant & strength .~ 8 & agility .~ 20
   Herbivore -> plain & creature .~ Herbivore & strength .~ 50 & agility .~ 60
   Carnivore -> plain & creature .~ Carnivore & strength .~ 90 & agility .~ 60
-  Human -> plain & creature .~ Human & strength .~ 25 & agility .~ 25
   where
     plain = Alife {
       _pos = V2 320 240, _arg = 0,
@@ -85,8 +86,7 @@ create u = case u of
 eatBy :: Creature -> [Creature]
 eatBy Plant = []
 eatBy Herbivore = [Plant]
-eatBy Carnivore = [Herbivore, Human]
-eatBy Human = [Plant, Herbivore]
+eatBy Carnivore = [Herbivore]
 
 spawn :: Alife -> StateT World (System s) ()
 spawn ai = do
@@ -225,7 +225,7 @@ main = void $ runSystemDefault $ do
   renderText <- Text.simple defaultFont 15
 
   seed' <- liftIO $ save =<< createSystemRandom
-  sim <- new $ variable $ World M.empty [] seed' Nothing
+  sim <- new $ variable $ World M.empty [] seed' Nothing [] 0
 
   replicateM_ 100 $ do
     sim .- do
@@ -241,6 +241,7 @@ main = void $ runSystemDefault $ do
       spawn (create Carnivore & pos .~ p & destination .~ p)
 
   linkPicture $ \_ -> do
+    sim .- globalCounter += 1
     sim .- canvas .= []
 
     sim .- do
@@ -249,13 +250,6 @@ main = void $ runSystemDefault $ do
         evolve i
         when (ls ^?! ix i ^. condition == Dead) $ lives %= (sans i)
 
-      ps <- use lives <&> M.elems
-      canvas %= cons (color green $ translate (V2 10 20) $ renderText $ show $ length $ filter (\a -> a^.creature == Plant) ps)
-      canvas %= cons (color yellow $ translate (V2 10 40) $ renderText $ show $ length $ filter (\a -> a^.creature == Herbivore) ps)
-      canvas %= cons (color red $ translate (V2 10 60) $ renderText $ show $ length $ filter (\a -> a^.creature == Carnivore) $ ps)
-      canvas %= cons (mconcat $ fmap pictureOf ps)
-
-    sim .- do
       m <- use cursor
       ls <- use lives
       cursor .= (m >>= \i -> ifThenElse (M.member i ls) m Nothing)
@@ -271,6 +265,29 @@ main = void $ runSystemDefault $ do
           canvas %= cons (color c $ translate (x^.pos + V2 20 5) $ renderText $ "STR: " ++ show (x^.strength))
 
       Nothing -> return ()
+
+    sim .- do
+      ps <- use lives <&> M.elems
+      let plants = length $ filter (\a -> a^.creature == Plant) ps
+      let herbs = length $ filter (\a -> a^.creature == Herbivore) ps
+      let carns = length $ filter (\a -> a^.creature == Carnivore) ps
+      whenM (use globalCounter <&> \t -> t `mod` 30 == 0) $ do
+        spratio %= cons (plants,herbs,carns)
+
+      let d = 2
+      let ymax = 150
+      let yscale = 0.15
+      ds <- use spratio
+      canvas %= cons (color (V4 0 1 0 1) $ line $ fmap (\(p,x) -> V2 x (ymax - fromIntegral (p^._1) * yscale - 0.1)) $ zip ds [d,d*2..])
+      canvas %= cons (color (V4 1 1 0 1) $ line $ fmap (\(p,x) -> V2 x (ymax - fromIntegral (p^._2) * yscale - 0.1)) $ zip ds [d,d*2..])
+      canvas %= cons (color (V4 1 0 0 1) $ line $ fmap (\(p,x) -> V2 x (ymax - fromIntegral (p^._3) * yscale - 0.1)) $ zip ds [d,d*2..])
+
+      canvas %= cons (color green $ translate (V2 10 20) $ renderText $ show plants)
+      canvas %= cons (color yellow $ translate (V2 10 40) $ renderText $ show herbs)
+      canvas %= cons (color red $ translate (V2 10 60) $ renderText $ show carns)
+      canvas %= cons (color (V4 0 0 0 0.4) $ polygon [V2 0 0, V2 0 ymax, V2 (window^._x) ymax, V2 (window^._x) 0])
+
+      canvas %= cons (mconcat $ fmap pictureOf $ sortBy (comparing (^.creature)) $ ps)
 
     sim .- use canvas <&> mconcat
 
@@ -292,7 +309,6 @@ main = void $ runSystemDefault $ do
       Plant -> color green $ box 4
       Herbivore -> color yellow $ box 10
       Carnivore -> color red $ box 10
-      Human -> color blue $ box 7
 
     mouseClicked (Button _) = True
     mouseClicked _ = False
