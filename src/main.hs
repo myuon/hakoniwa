@@ -4,7 +4,6 @@ import Call.Util.Text as Text
 import qualified Data.BoundingBox as Box
 import Control.Lens
 import Control.Monad.State.Strict
-import Control.Monad.Trans.Maybe
 import qualified Data.IntMap.Strict as M
 import Data.Ord (comparing)
 import Data.List (sortBy)
@@ -112,17 +111,16 @@ evolve j = do
 
   where
   runAI = do
-    x <- get
+    ai <- get
     V2 px py <- (-) <$> use destination <*> use pos
     arg .= (atan2 py px) `approx` ((2 * pi) * 15 / 360)
     
-    when (x^.agility > 20 && norm (V2 px py) > 10) $ do
+    when (ai^.agility > 20 && norm (V2 px py) > 10) $ do
       let f = \x -> x / 300 + 1
       let q = \x -> sqrt x / 150 + 1
-      let hunting = if x^.condition == Hunting then 1.2 else 1.0
-      pos += (fromIntegral (x^.agility) / 20 * f (100 - x^.life) / 2 / q (fromIntegral $ x^.counter)) *^ V2 (cos $ x^.arg) (sin $ x^.arg)
-    when (x^.life < 0) $ condition .= Dead
-    life -= fromIntegral (x^.strength) / 1000 + fromIntegral (x^.agility) / 1000
+      pos += (fromIntegral (ai^.agility) / 20 * f (100 - ai^.life) / 2 / q (fromIntegral $ ai^.counter)) *^ V2 (cos $ ai^.arg) (sin $ ai^.arg)
+    when (ai^.life < 0) $ condition .= Dead
+    life -= fromIntegral (ai^.strength) / 1000 + fromIntegral (ai^.agility) / 1000
     counter += 1
 
   eat i = do
@@ -154,7 +152,7 @@ evolve j = do
     x <- getAI i
     es' <- searchIn i d es
     when (es' /= []) $ do
-      lives . ix i . destination .= (getInside $ sum $ fmap (\e -> let d = x^.pos - e^.pos in (quadrance d) *^ d) es')
+      lives . ix i . destination .= (getInside $ sum $ fmap (\e -> let d' = x^.pos - e^.pos in (quadrance d') *^ d') es')
 
   getAI i = use lives <&> (^?! ix i)
 
@@ -215,8 +213,6 @@ evolve j = do
          p <- randomVec2 (x^.pos - 40, x^.pos + 40)
          spawn (create Plant & pos .~ p & destination .~ p)
 
-  evolve' _ _ = return ()
-
 main :: IO ()
 main = void $ runSystemDefault $ do
   setTitle "hakoniwa"
@@ -224,18 +220,20 @@ main = void $ runSystemDefault $ do
   setBoundingBox $ Box.Box 0 window
   renderText <- Text.simple defaultFont 15
 
+  bmps <- mapM readBitmap ["img/creature0.png", "img/creature1.png", "img/creature2.png"]
+
   seed' <- liftIO $ save =<< createSystemRandom
   sim <- new $ variable $ World M.empty [] seed' Nothing [] 0
 
-  replicateM_ 100 $ do
+  replicateM_ 50 $ do
     sim .- do
       p <- randomVec2 (V2 0 0, window)
       spawn (create Plant & pos .~ p & destination .~ p)
-  replicateM_ 40 $ do
+  replicateM_ 20 $ do
     sim .- do
       p <- randomVec2 (V2 0 0, window)
       spawn (create Herbivore & pos .~ p & destination .~ p)
-  replicateM_ 5 $ do
+  replicateM_ 3 $ do
     sim .- do
       p <- randomVec2 (V2 0 0, window)
       spawn (create Carnivore & pos .~ p & destination .~ p)
@@ -251,7 +249,6 @@ main = void $ runSystemDefault $ do
         when (ls ^?! ix i ^. condition == Dead) $ lives %= (sans i)
 
       m <- use cursor
-      ls <- use lives
       cursor .= (m >>= \i -> ifThenElse (M.member i ls) m Nothing)
 
     m <- sim .- use cursor
@@ -271,9 +268,10 @@ main = void $ runSystemDefault $ do
       let plants = length $ filter (\a -> a^.creature == Plant) ps
       let herbs = length $ filter (\a -> a^.creature == Herbivore) ps
       let carns = length $ filter (\a -> a^.creature == Carnivore) ps
-      whenM (use globalCounter <&> \t -> t `mod` 30 == 0) $ do
-        spratio %= cons (plants,herbs,carns)
+--      whenM (use globalCounter <&> \t -> t `mod` 30 == 0) $ do
+--        spratio %= cons (plants,herbs,carns)
 
+{-
       let d = 2
       let ymax = 150
       let yscale = 0.15
@@ -281,13 +279,17 @@ main = void $ runSystemDefault $ do
       canvas %= cons (color (V4 0 1 0 1) $ line $ fmap (\(p,x) -> V2 x (ymax - fromIntegral (p^._1) * yscale - 0.1)) $ zip ds [d,d*2..])
       canvas %= cons (color (V4 1 1 0 1) $ line $ fmap (\(p,x) -> V2 x (ymax - fromIntegral (p^._2) * yscale - 0.1)) $ zip ds [d,d*2..])
       canvas %= cons (color (V4 1 0 0 1) $ line $ fmap (\(p,x) -> V2 x (ymax - fromIntegral (p^._3) * yscale - 0.1)) $ zip ds [d,d*2..])
+-}
 
       canvas %= cons (color green $ translate (V2 10 20) $ renderText $ show plants)
       canvas %= cons (color yellow $ translate (V2 10 40) $ renderText $ show herbs)
       canvas %= cons (color red $ translate (V2 10 60) $ renderText $ show carns)
-      canvas %= cons (color (V4 0 0 0 0.4) $ polygon [V2 0 0, V2 0 ymax, V2 (window^._x) ymax, V2 (window^._x) 0])
 
-      canvas %= cons (mconcat $ fmap pictureOf $ sortBy (comparing (^.creature)) $ ps)
+{-
+      canvas %= cons (color (V4 0 0 0 0.4) $ polygon [V2 0 0, V2 0 ymax, V2 (window^._x) ymax, V2 (window^._x) 0])
+-}
+
+      canvas %= cons (mconcat $ fmap (pictureOf bmps) $ sortBy (comparing (^.creature)) $ ps)
 
     sim .- use canvas <&> mconcat
 
@@ -304,11 +306,11 @@ main = void $ runSystemDefault $ do
     box :: Float -> Picture
     box r = polygon [V2 (-r) (-r), V2 (-r) r, V2 r r, V2 r (-r)]
 
-    pictureOf :: Alife -> Picture
-    pictureOf x = translate (x^.pos) $ rotateOn (x^.arg) $ case (x^.creature) of
-      Plant -> color green $ box 4
-      Herbivore -> color yellow $ box 10
-      Carnivore -> color red $ box 10
+    pictureOf :: [Bitmap] -> Alife -> Picture
+    pictureOf bmps x = translate (x^.pos) $ scale 0.8 $ case (x^.creature) of
+      Plant -> bitmap (bmps !! 0)
+      Herbivore -> bitmap (bmps !! 1)
+      Carnivore -> bitmap (bmps !! 2)
 
     mouseClicked (Button _) = True
     mouseClicked _ = False
