@@ -2,7 +2,7 @@
 {-# LANGUAGE FlexibleInstances #-}
 import Call
 import Call.Util.Text as Text
-import qualified Data.BoundingBox as Box
+import Data.BoundingBox
 import Control.Lens
 import Control.Monad.State.Strict
 import Data.Ord (comparing)
@@ -10,16 +10,15 @@ import Data.List (sortBy)
 import Data.Array
 import Data.Array.IO
 import Data.Trees.KdTree as K
-import qualified Data.Map.Strict as M
 import qualified Data.IntMap.Strict as IM
 import System.Random.MWC hiding (create)
-import GHC.Float (float2Double)
+import GHC.Float (float2Double, double2Float)
 
 windowSize :: V2 Float
 windowSize = V2 854 480
 
 squareSize :: V2 Float
-squareSize = V2 15 15
+squareSize = V2 25 25
 
 squareNumber :: V2 Int
 squareNumber = fmap floor $ windowSize / squareSize
@@ -34,13 +33,6 @@ consMap' x m = snd $ consMap x m
 
 approx :: (RealFrac a) => a -> a -> a
 approx p a = let q = fromInteger $ floor $ p / a in a * q
-
-instance (Variate a) => Variate (V2 a) where
-  uniform = error "undefined method `uniform'"
-  uniformR (V2 a b, V2 c d) m = do
-    x <- uniformR (a,c) m
-    y <- uniformR (b,d) m
-    return $ V2 x y
 
 data Creature = Plant | Herbivore | Carnivore deriving (Eq, Ord, Enum, Show)
 data Condition = Idle | Hunting | Dead deriving (Eq, Show)
@@ -60,7 +52,9 @@ data Alife = Alife {
   _counter :: Int,
   _destination :: Vec2,
   _condition :: Condition,
-  _life :: Float
+  _life :: Float,
+  _viewRate :: Double,
+  _speedRate :: Float
   } deriving (Eq, Show)
 
 data World = World {
@@ -71,11 +65,18 @@ data World = World {
   _spratio :: [(Int,Int,Int)],
   _globalCounter :: Int,
   _fieldMap :: Array (Int,Int) FieldType,
-  _spTree :: M.Map Creature (K.KdTree (Int,Alife))
+  _spTree :: K.KdTree (Int,Alife)
   }
 
 makeLenses ''Alife
 makeLenses ''World
+
+instance (Variate a) => Variate (V2 a) where
+  uniform = error "undefined method `uniform'"
+  uniformR (V2 a b, V2 c d) m = do
+    x <- uniformR (a,c) m
+    y <- uniformR (b,d) m
+    return $ V2 x y
 
 instance K.Point Vec2 where
   dimension _ = 2
@@ -107,7 +108,8 @@ create u = case u of
     plain = Alife {
       _pos = V2 320 240, _arg = 0,
       _strength = 0, _agility = 0, _creature = undefined,
-      _counter = 0, _destination = 0, _condition = Idle, _life = 100
+      _counter = 0, _destination = 0, _condition = Idle, _life = 100,
+      _viewRate = 1.0, _speedRate = 1.0
       }
 
 eatBy :: Creature -> [Creature]
@@ -125,109 +127,150 @@ spawn ai = do
 
 randomR :: (Functor m, MonadIO m, Variate a) => (a,a) -> StateT World m a
 randomR r = do
+  s <- use seed
   gen <- liftIO . restore =<< use seed
   v <- liftIO $ uniformR r gen
   seed <~ liftIO (save gen)
   return v
 
+destructor :: Int -> StateT World (System s) ()
+destructor j = do
+  x <- getAI j
+  destructor' j (x^.creature)
+
+  where
+  getAI i = use lives <&> (^?! ix i)
+
+  plantAround :: Vec2 -> Float -> StateT World (System s) ()
+  plantAround x d = do
+    let Box c1 c2 = Box (x - pure d) (x + pure d) `intersect` Box 0 windowSize
+    p <- randomR (c1, c2)
+    spawn (create Plant & pos .~ p & destination .~ p)
+
+  destructor' i Plant = return ()
+  destructor' i Herbivore = do
+    x <- getAI i
+    let view = (x^.viewRate) * 80
+    replicateM_ (floor $ fromIntegral (x^.strength) / 10) $ plantAround (x^.pos) (double2Float view)
+  destructor' i Carnivore = do
+    x <- getAI i
+    let view = (x^.viewRate) * 80
+    replicateM_ (floor $ fromIntegral (x^.strength) / 10) $ plantAround (x^.pos) (double2Float view)
+
 evolve :: Int -> StateT World (System s) ()
 evolve j = do
   x <- getAI j
+
+  fm <- use fieldMap
+  let V2 sx sy = fmap floor $ x^.pos / squareSize
+  zoom (lives . ix j) $ fieldAction (fm ! (sx,sy))
+
   eat j
   evolve' j (x^.creature)
   zoom (lives . ix j) runAI
 
   where
+  getAI i = use lives <&> (^?! ix i)
+
   runAI = do
     ai <- get
     V2 px py <- (-) <$> use destination <*> use pos
     arg .= (atan2 py px) `approx` ((2 * pi) * 15 / 360)
     
+    spR <- use speedRate
     when (ai^.agility > 20 && norm (V2 px py) > 10) $ do
       let f = \x -> x / 300 + 1
       let q = \x -> sqrt x / 150 + 1
-      pos += (fromIntegral (ai^.agility) / 20 * f (100 - ai^.life) / 2 / q (fromIntegral $ ai^.counter)) *^ V2 (cos $ ai^.arg) (sin $ ai^.arg)
+      let vel = fromIntegral (ai^.agility) / 20 * f (100 - ai^.life) / 2 / q (fromIntegral $ ai^.counter)
+      pos += vel * spR *^ V2 (cos $ ai^.arg) (sin $ ai^.arg)
     when (ai^.life < 0) $ condition .= Dead
-    life -= fromIntegral (ai^.strength) / 1000 + fromIntegral (ai^.agility) / 1000
+    life -= (fromIntegral (ai^.strength) / 1000 + fromIntegral (ai^.agility) / 1000) * spR
     counter += 1
+
+  fieldAction :: FieldType -> StateT Alife (System s) ()
+  fieldAction Land = do
+    viewRate .= 1
+    speedRate .= 1
+  fieldAction Forest = do
+    viewRate .= 0.5
+    speedRate .= 0.5
 
   eat :: Int -> StateT World (System s) Bool
   eat i = do
     x <- getAI i
+    xs <- searchIn i 10 (eatBy $ x^.creature) <&> filter (\(_,z) -> z^.life > 0)
+    when (xs /= []) $ do
+      let (iy,y) = head xs
+      lives . ix i . life += (fromIntegral $ y^.strength)^2 / 200
+      lives . ix i . life %= min 100
+      lives . ix iy . life -= (fromIntegral $ x^.strength)^3 / 100000
+      canvas %= cons (color (V4 1 0.5 0 1) $ line [y^.pos, x^.pos])
 
-    forM_ (eatBy $ x^.creature) $ \sp -> do
-      tree <- use spTree <&> (^?! ix sp)
-      xs <- filter (\(k,z) -> k /= i && z^.life > 0) <$> mapM (\(k,_) -> getAI k >>= \z -> return (k,z)) (nearNeighbors tree 10 (i,x))
-      when (xs /= []) $ do
-        let (iy,y) = head xs
-        lives . ix i . life += (fromIntegral $ y^.strength)^2 / 200
-        lives . ix i . life %= min 100
-        lives . ix iy . life -= (fromIntegral $ x^.strength)^3 / 100000
-        canvas %= cons (color (V4 1 0.5 0 1) $ line [y^.pos, x^.pos])
+    return $ xs == []
 
-    x' <- getAI i
-    return $ x^.life == x'^.life
-
-  searchIn :: Int -> Double -> Creature -> StateT World (System s) [Alife]
-  searchIn i d target = do
+  searchIn :: Int -> Double -> [Creature] -> StateT World (System s) [(Int, Alife)]
+  searchIn i d targets = do
     x <- getAI i
-    spT <- use spTree <&> (^?! ix target)
+    spT <- use spTree
+    mapM (\(k,_) -> getAI k >>= \z -> return (k,z)) $ reverse $ filter (\(j,z) -> j /= i && z^.creature `elem` targets) $ nearNeighbors spT d (i,x)
 
-    mapM (\(k,_) -> getAI k) $ reverse $ nearNeighbors spT d (i,x)
-
+  randomWalk :: Int -> StateT World (System s) ()
   randomWalk i = do
     x <- getAI i
     when ((x^.counter) `mod` 500 == 0 || distance (x^.pos) (x^.destination) < 10) $ do
       p <- randomR (getInside $ x^.pos - 150, getInside $ x^.pos + 150)
       lives . ix i . destination .= p
 
+  runAwayFrom :: Int -> Double -> [Creature] -> StateT World (System s) ()
   runAwayFrom i d es = do
     x <- getAI i
-    es' <- searchIn i d es
+    es' <- fmap snd <$> searchIn i d es
     when (es' /= []) $ do
       lives . ix i . destination .= (getInside $ sum $ fmap (\e -> let d' = x^.pos - e^.pos in (quadrance d') *^ d') es')
 
-  getAI i = use lives <&> (^?! ix i)
+  plantAround :: Vec2 -> Float -> StateT World (System s) ()
+  plantAround x d = do
+    let Box c1 c2 = Box (x - pure d) (x + pure d) `intersect` Box 0 windowSize
+    p <- randomR (c1, c2)
+    spawn (create Plant & pos .~ p & destination .~ p)
 
   evolve' i Plant = do
     x <- getAI i
     plants <- use lives <&> IM.filter (\a -> a ^. creature == Plant && distance (a^.pos) (x^.pos) < 100)
-    when (x ^. counter `mod` 150 == 0 && IM.size plants < 10) $ replicateM_ 3 $ do
-      p <- randomR (x^.pos - 30, x^.pos + 30)
-      spawn (create Plant & pos .~ p & destination .~ p)
+    when (x ^. counter `mod` 150 == 0 && IM.size plants < 10) $ replicateM_ 3 $ plantAround (x^.pos) 30
 
   evolve' i Herbivore = do
     x <- getAI i
+    let view = (x^.viewRate) * 80
     whenM (eat i) $ do
       if
        | x^.condition == Idle || x^.condition == Hunting -> do
-         xs <- searchIn i 80 (head $ eatBy $ x^.creature)
-         ys <- searchIn i 20 (head $ eatBy $ x^.creature)
-         zs <- searchIn i 5 (head $ eatBy $ x^.creature)
+         xs <- fmap snd <$> searchIn i view (eatBy $ x^.creature)
+         ys <- fmap snd <$> searchIn i 20 (eatBy $ x^.creature)
+         zs <- fmap snd <$> searchIn i 5 (eatBy $ x^.creature)
          unless (zs /= []) $ do
            if
              | ys /= [] -> lives . ix i . destination .= (head ys ^. pos)
              | x^.life < 50 && xs /= [] -> lives . ix i . destination .= (head xs ^. pos)
              | x^.life > 80
                && (200 < x^.counter)
-               && x^.counter `mod` 300 == 0 -> spawn (create (x^.creature) & pos .~ (x^.pos))
+               && x^.counter `mod` 500 == 0 -> spawn (create (x^.creature) & pos .~ (x^.pos))
              | otherwise -> do
                  randomWalk i
 
-         runAwayFrom i 40 Carnivore
+         runAwayFrom i (view / 2) [Carnivore]
        
-       | x^.condition == Dead -> replicateM_ (floor $ fromIntegral (x^.strength) / 10) $ do
-         p <- randomR (x^.pos - 40, x^.pos + 40)
-         spawn (create Plant & pos .~ p & destination .~ p)
+       | x^.condition == Dead -> return ()
 
   evolve' i Carnivore = do
     x <- getAI i
+    let view = (x^.viewRate) * 40
     whenM (eat i) $ do
       if
        | x^.condition == Idle || x^.condition == Hunting -> do
-          xs <- searchIn i 30 (head $ eatBy $ x^.creature)
-          ys <- searchIn i 20 (head $ eatBy $ x^.creature)
-          zs <- searchIn i 5 (head $ eatBy $ x^.creature)
+          xs <- fmap snd <$> searchIn i view (eatBy $ x^.creature)
+          ys <- fmap snd <$> searchIn i 20 (eatBy $ x^.creature)
+          zs <- fmap snd <$> searchIn i 5 (eatBy $ x^.creature)
           unless (zs /= []) $ do
             if
               | ys /= [] -> lives . ix i . destination .= (head ys ^. pos)
@@ -236,15 +279,13 @@ evolve j = do
                   lives . ix i . destination .= (head xs ^. pos)
               | x^.life > 80
                 && (200 < x^.counter)
-                && x^.counter `mod` 300 == 0 -> do
+                && x^.counter `mod` 500 == 0 -> do
                   lives . ix i . condition .= Idle
                   spawn (create (x^.creature) & pos .~ (x^.pos))
               | otherwise -> do
                   lives . ix i . condition .= Idle
                   randomWalk i
-       | x^.condition == Dead -> replicateM_ (floor $ fromIntegral (x^.strength) / 10) $ do
-         p <- randomR (x^.pos - 40, x^.pos + 40)
-         spawn (create Plant & pos .~ p & destination .~ p)
+       | x^.condition == Dead -> return ()
 
 newField :: StateT World (System s) (Array (Int,Int) FieldType)
 newField = do
@@ -269,7 +310,7 @@ main :: IO ()
 main = void $ runSystemDefault $ do
   setTitle "hakoniwa"
   setFPS 30
-  setBoundingBox $ Box.Box 0 windowSize
+  setBoundingBox $ Box 0 windowSize
   renderText <- Text.simple defaultFont 15
 
   bmps <- mapM readBitmap ["img/creature0.png", "img/creature1.png", "img/creature2.png"]
@@ -279,7 +320,7 @@ main = void $ runSystemDefault $ do
     _lives = IM.empty, _canvas = [], _seed = seed',
     _cursor = Nothing, _spratio = [], _globalCounter = 0,
     _fieldMap = listArray ((0,0),(0,0)) $ [],
-    _spTree = M.fromList $ zip [Plant .. Carnivore] $ repeat $ K.fromList []
+    _spTree = K.fromList []
     }
   sim .- (fieldMap <~ newField)
 
@@ -302,15 +343,15 @@ main = void $ runSystemDefault $ do
 
     sim .- do
       ls <- use lives
-      forM_ (IM.keys ls) $ \i -> do
-        evolve i
+      forM_ (IM.keys ls) evolve
 
-    sim .- do
-      lives %= IM.filter (\a -> a^.condition /= Dead)
+      forM_ (IM.assocs ls) $ \(i,x) -> do
+        when (x^.condition == Dead) $ do
+          destructor i
+          lives %= sans i
 
-      forM_ [Plant, Herbivore, Carnivore] $ \c -> do
-        ls <- use lives
-        spTree . ix c .= (K.fromList $ IM.assocs $ IM.filter (\a -> a^.creature == c) ls)
+--      lives %= IM.filter (\a -> a^.condition /= Dead)
+      spTree <~ (use lives <&> K.fromList . IM.assocs)
 
     sim .- do
       ls <- use lives
@@ -326,7 +367,6 @@ main = void $ runSystemDefault $ do
           canvas %= cons (color c $ translate (x^.pos) $ circleOutline 15)
           canvas %= cons (color c $ translate (x^.pos + V2 20 (-15)) $ renderText $ "LIFE: " ++ show (floor $ x^.life))
           canvas %= cons (color c $ translate (x^.pos + V2 20 5) $ renderText $ "STR: " ++ show (x^.strength))
-
       Nothing -> return ()
 
     sim .- do
@@ -355,7 +395,7 @@ main = void $ runSystemDefault $ do
 
       fm <- use fieldMap
       let V2 w h = squareNumber
-      forM_ [0..w] $ \x ->
+      forM_ [0..w] $ \x -> do
         forM_ [0..h] $ \y -> do
           canvas %= cons (paintOf (x,y) $ fm ! (x,y))
 
