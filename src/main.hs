@@ -82,14 +82,17 @@ instance K.Point Vec2 where
   dimension _ = 2
   coord 0 p = float2Double $ p^._x
   coord 1 p = float2Double $ p^._y
+  {-# INLINE coord #-}
 
 instance K.Point Alife where
   dimension x = dimension $ x^.pos
   coord i x = coord i $ x^.pos
+  {-# INLINE coord #-}
 
 instance K.Point b => K.Point (a,b) where
   dimension (_,y) = dimension y
   coord i (_,p) = coord i p
+  {-# INLINE coord #-}
 
 getInside :: Vec2 -> Vec2
 getInside (V2 x y)
@@ -192,7 +195,7 @@ evolve j = do
     viewRate .= 1
     speedRate .= 1
   fieldAction Forest = do
-    viewRate .= 0.5
+    viewRate .= 0.85
     speedRate .= 0.5
 
   eat :: Int -> StateT World (System s) Bool
@@ -265,6 +268,8 @@ evolve j = do
   evolve' i Carnivore = do
     x <- getAI i
     let view = (x^.viewRate) * 40
+    canvas %= cons (translate (x^.pos) $ color (V4 0.4 0.3 1 0.5) $ circleOutline $ if x^.life < 70 then double2Float view else 20)
+
     whenM (eat i) $ do
       if
        | x^.condition == Idle || x^.condition == Hunting -> do
@@ -350,7 +355,6 @@ main = void $ runSystemDefault $ do
           destructor i
           lives %= sans i
 
---      lives %= IM.filter (\a -> a^.condition /= Dead)
       spTree <~ (use lives <&> K.fromList . IM.assocs)
 
     sim .- do
@@ -418,7 +422,7 @@ main = void $ runSystemDefault $ do
     pictureOf bmps x = translate (x^.pos) $ scale 0.8 $ case (x^.creature) of
       Plant -> bitmap (bmps !! 0)
       Herbivore -> bitmap (bmps !! 1)
-      Carnivore -> bitmap (bmps !! 2)
+      Carnivore -> let p = x^.life / 100 in color (V4 1 p p 1) $ bitmap (bmps !! 2)
 
     paintOf :: (Int,Int) -> FieldType -> Picture
     paintOf (x,y) ftype = translate v $ case ftype of
