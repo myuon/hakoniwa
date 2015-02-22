@@ -1,5 +1,5 @@
 {-# LANGUAGE GADTs, TemplateHaskell, FlexibleContexts, MultiWayIf #-}
-{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE FlexibleInstances, BangPatterns #-}
 import Call
 import Call.Util.Text as Text
 import Data.BoundingBox
@@ -58,7 +58,7 @@ data Alife = Alife {
   } deriving (Eq, Show)
 
 data World = World {
-  _lives :: IM.IntMap Alife,
+  _lives :: !(IM.IntMap Alife),
   _canvas :: [Picture],
   _seed :: Seed,
   _cursor :: Maybe Int,
@@ -321,7 +321,7 @@ main = void $ runSystemDefault $ do
   bmps <- mapM readBitmap ["img/creature0.png", "img/creature1.png", "img/creature2.png"]
 
   seed' <- liftIO $ save =<< createSystemRandom
-  sim <- newSettle $ variable $ World {
+  sim <- new $ variable $ World {
     _lives = IM.empty, _canvas = [], _seed = seed',
     _cursor = Nothing, _spratio = [], _globalCounter = 0,
     _fieldMap = listArray ((0,0),(0,0)) $ [],
@@ -343,8 +343,8 @@ main = void $ runSystemDefault $ do
       spawn (create Carnivore & pos .~ p & destination .~ p)
 
   linkPicture $ \_ -> do
-    sim .- globalCounter += 1
-    sim .- canvas .= []
+    sim .- (globalCounter += 1)
+    sim .- (canvas .= [])
 
     sim .- do
       ls <- use lives
