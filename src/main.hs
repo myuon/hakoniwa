@@ -179,7 +179,7 @@ evolve j = do
     ai <- get
     V2 px py <- (-) <$> use destination <*> use pos
     arg .= (atan2 py px) `approx` ((2 * pi) * 15 / 360)
-    
+
     spR <- use speedRate
     when (ai^.agility > 20 && norm (V2 px py) > 10) $ do
       let f = \x -> x / 300 + 1
@@ -262,7 +262,7 @@ evolve j = do
                  randomWalk i
 
          runAwayFrom i (view / 2) [Carnivore]
-       
+
        | x^.condition == Dead -> return ()
 
   evolve' i Carnivore = do
@@ -303,7 +303,7 @@ newField = do
   replicateM_ 10 $ go arr
   liftIO $ freeze arr
   where
-    V2 w h = fmap floor $ windowSize / squareSize    
+    V2 w h = fmap floor $ windowSize / squareSize
     go arr = do
       forM_ [1..w-1] $ \x ->
         forM_ [1..h-1] $ \y -> do
@@ -434,4 +434,3 @@ main = void $ runSystemDefault $ do
 
     mouseClicked (Button _) = True
     mouseClicked _ = False
-

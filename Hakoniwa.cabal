@@ -20,12 +20,12 @@ executable Hakoniwa
   main-is:             main.hs
   -- other-modules:       
   -- other-extensions:    
-  build-depends:       base >=4.7 && <4.8
-                     , call >=0.1.4 && <2
+  build-depends:       base >=4.7 && <5
+                     , call >=0.2 && <1
                      , boundingboxes >=0.2 && <0.4
                      , lens >=4 && <5
                      , mtl ==2.*
-                     , transformers ==0.4.*
+                     , transformers >=0.3
                      , containers ==0.5.*
                      , array ==0.5.*
                      , mwc-random ==0.13.*
