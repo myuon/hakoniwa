@@ -1,4 +1,0 @@
-[submodule "pages"]
-	path = pages
-	url = git@github.com:myuon/hakoniwa.git
-	branch = gh-pages
