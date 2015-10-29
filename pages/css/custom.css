@@ -1,0 +1,31 @@
+#dungeon-field {
+  width: 500px;
+  height: 360px;
+  border: 1px solid black;
+
+  color: #ccc;
+}
+
+#player {
+  position: absolute;
+  color: #000;
+}
+
+#dungeon-field, #player {
+  display: block;
+
+  font-family: "Liberation Mono";
+  line-height: 10px;
+  font-size: 15px;
+  letter-spacing: 2px;
+}
+
+.career {
+  font-size: 10px;
+  margin: 0;
+}
+
+.progress {
+  height: 10px;
+  margin: 3px;
+}
