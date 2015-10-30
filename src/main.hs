@@ -2,7 +2,9 @@
 import Haste
 import Haste.DOM
 import Haste.Events
+import Haste.Foreign hiding (get)
 import Haste.Graphics.Canvas
+import Haste.Graphics.AnimationFrame
 import Control.Applicative
 import Control.Arrow
 import Control.Monad
@@ -15,6 +17,7 @@ import Data.IORef
 import Lens.Family2
 import Lens.Family2.Unchecked
 import Lens.Family2.State.Lazy
+import JSArray
 
 data V2 a = V2 !a !a deriving (Eq, Ord, Show)
 type Vec2 = V2 Double
@@ -185,6 +188,28 @@ spawn ai = do
     Herbivore -> when ((< 200) $ length $ filter (\a -> a^.creature == Herbivore) ps) $ lives %= consMap' ai
     Carnivore -> when ((< 50) $ length $ filter (\a -> a^.creature == Carnivore) ps) $ lives %= consMap' ai
 
+destruct :: Int -> StateT World IO ()
+destruct j = do
+  x <- use $ lives . ix j
+  destructor' j (x^.creature)
+
+  where
+    plantAround :: Vec2 -> Double -> StateT World IO ()
+    plantAround x d = do
+      let V2 c1 c2 = V2 (x - pure d) (x + pure d) `intersection` V2 0 windowSize
+      p <- randomRIO (c1, c2)
+      spawn (newLife Plant & pos .~ p & destination .~ p)
+
+    destructor' i Plant = return ()
+    destructor' i Herbivore = do
+      x <- use $ lives . ix j
+      let view = (x^.viewRate) * 80
+      replicateM_ (floor $ fromIntegral (x^.strength) / 10) $ plantAround (x^.pos) view
+    destructor' i Carnivore = do
+      x <- use $ lives . ix j
+      let view = (x^.viewRate) * 80
+      replicateM_ (floor $ fromIntegral (x^.strength) / 10) $ plantAround (x^.pos) view
+
 evolve :: Int -> StateT World IO ()
 evolve j = do
   ai <- use (lives . ix j)
@@ -337,37 +362,43 @@ main = do
       onEvent e Click $ \_ -> do
         onceStateT ref $ running .= False
 
-    void $ setTimer (Repeat 30) $ void $ onceStateT ref $ do
-      r <- use running
-      when r $ do
-        ls <- use lives
+    let f0 = ffi $ toJSString "(function(){ return console.time('100times'); })" :: () -> IO ()
+    f0 ()
 
-        forM_ (IM.assocs ls) $ \(i,x) -> do
-          evolve i
+    void $ setTimer (Repeat 20) $ void $ onceStateT ref $ do
+      globalCounter += 1
 
-        render cv $ do
-          forM_ (IM.assocs ls) $ \(i,x) -> do
-            let ps = M.fromList $ zip [Plant, Herbivore, Carnivore] [0..]
-            draw (bmps !! (ps M.! (x^.creature))) $ fromV2 $ x^.pos
+      c <- use globalCounter
+      when (c == 100) $ liftIO $ do
+        let f1 = ffi $ toJSString "(function(){ return console.timeEnd('100times'); })" :: () -> IO ()
+        f1 ()
 
-    -- mainloop ref bmps cv
+      ps <- forM [0..4000] $ \_ -> randomRIO (0,windowSize)
+      let k = IM.fromList $ zip [0..] ps
 
--- mainloop ref bmps cv = do
---   onceStateT ref $ do
---     globalCounter += 1
---
---     ls <- use lives
---
---     forM_ (IM.assocs ls) $ \(i,x) -> do
---       evolve i
---
---     render cv $ do
---       forM_ (IM.assocs ls) $ \(i,x) -> do
---         let ps = M.fromList $ zip [Plant, Herbivore, Carnivore] [0..]
---         draw (bmps !! (ps M.! (x^.creature))) $ fromV2 $ x^.pos
---
---   void $ setTimer (Once 100) $ mainloop ref bmps cv
---
+      render cv $ do
+        forM_ [0..400] $ \i -> do
+          draw (bmps !! 2) $ fromV2 $ k IM.! i
+
+      -- r <- use running
+      -- when r $ do
+      --   withElem "alife-num" $ \e -> do
+      --     s <- IM.size <$> use lives
+      --     setProp e "innerText" $ show s
+      --
+      --   ls <- use lives
+      --
+      --   forM_ (IM.keys ls) $ evolve
+      --   forM_ (IM.assocs ls) $ \(i,x) -> do
+      --     when (x^.condition == Dead) $ do
+      --       destruct i
+      --       lives %= IM.delete i
+      --
+      --   render cv $ do
+      --     forM_ (IM.assocs ls) $ \(i,x) -> do
+      --       let ps = M.fromList $ zip [Plant, Herbivore, Carnivore] [0..]
+      --       draw (bmps !! (ps M.! (x^.creature))) $ fromV2 $ x^.pos
+
 onceStateT :: IORef s -> StateT s IO a -> IO a
 onceStateT ref m = do
   x <- readIORef ref
