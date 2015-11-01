@@ -1,4 +1,5 @@
-{-# LANGUAGE RankNTypes, FlexibleInstances, MultiWayIf #-}
+{-# LANGUAGE RankNTypes, FlexibleInstances, FlexibleContexts, MultiWayIf #-}
+{-# LANGUAGE LiberalTypeSynonyms, ImpredicativeTypes #-}
 import Haste
 import Haste.DOM
 import Haste.Events
@@ -10,6 +11,7 @@ import Control.Arrow
 import Control.Monad
 import Control.Monad.State
 import qualified Data.IntMap as IM
+-- import qualified JSArray as IM
 import qualified Data.Map as M
 import Data.List
 import Data.Ord
@@ -17,7 +19,6 @@ import Data.IORef
 import Lens.Family2
 import Lens.Family2.Unchecked
 import Lens.Family2.State.Lazy
-import JSArray
 
 data V2 a = V2 !a !a deriving (Eq, Ord, Show)
 type Vec2 = V2 Double
@@ -80,15 +81,17 @@ approx p a = let q = fromInteger $ floor $ p / a in a * q
 distance :: Vec2 -> Vec2 -> Double
 distance v v' = norm $ v - v'
 
-ix :: Int -> Lens' (IM.IntMap b) b
+ix :: (ToAny b, FromAny b) => Int -> Lens' (IM.IntMap b) b
 ix n = lens (IM.! n) (\l x -> IM.insert n x l)
 
-consMap :: a -> IM.IntMap a -> (Int, IM.IntMap a)
-consMap x m
-  | IM.size m == 0 = (0, m & ix 0 .~ x)
-  | otherwise = let (i,_) = IM.findMax m in (i+1, m & ix (i+1) .~ x)
+consMap :: (ToAny a, FromAny a) => a -> IM.IntMap a -> (Int, IM.IntMap a)
+consMap x m = (n, m & ix n .~ x) where
+  ks = filter (\(i,j) -> i /= j) $ zip (IM.keys m) [0..]
+  n | IM.size m == 0 = 0
+    | ks == [] = last (IM.keys m) + 1
+    | otherwise = snd $ head $ ks
 
-consMap' :: a -> IM.IntMap a -> IM.IntMap a
+consMap' :: (ToAny a, FromAny a) => a -> IM.IntMap a -> IM.IntMap a
 consMap' x m = snd $ consMap x m
 
 randomRIO :: (Random a, MonadIO m) => (a,a) -> m a
@@ -130,6 +133,12 @@ data Alife = Alife {
   _speedRate :: Double
   } deriving (Eq, Show)
 
+instance ToAny Alife where
+  toAny = toAny . toOpaque
+
+instance FromAny Alife where
+  fromAny = fmap fromOpaque . fromAny
+
 pos :: Lens' Alife Vec2; pos = lens _pos (\a x -> a { _pos = x })
 arg :: Lens' Alife Double; arg = lens _arg (\a x -> a { _arg = x })
 strength :: Lens' Alife Int; strength = lens _strength (\a x -> a { _strength = x })
@@ -147,7 +156,8 @@ data World = World {
   _cursor :: Maybe Int,
   _spratio :: [(Int,Int,Int)],
   _globalCounter :: Int,
-  _running :: Bool
+  _running :: Bool,
+  _timeStamp :: HRTimeStamp
   }
 
 lives :: Lens' World (IM.IntMap Alife); lives = lens _lives (\a x -> a { _lives = x })
@@ -155,6 +165,7 @@ cursor :: Lens' World (Maybe Int); cursor = lens _cursor (\a x -> a { _cursor = 
 spratio :: Lens' World [(Int, Int, Int)]; spratio = lens _spratio (\a x -> a { _spratio = x })
 globalCounter :: Lens' World Int; globalCounter = lens _globalCounter (\a x -> a { _globalCounter = x })
 running :: Lens' World Bool; running = lens _running (\a x -> a { _running = x })
+timeStamp :: Lens' World HRTimeStamp; timeStamp = lens _timeStamp (\a x -> a { _timeStamp = x })
 
 completeLoadBitmaps :: [Bitmap] -> IO () -> IO ()
 completeLoadBitmaps bs cont = foldr (\b m -> void $ onEvent (elemOf b) Load $ const m) cont bs
@@ -336,13 +347,64 @@ evolve j = do
                     randomWalk i
          | x^.condition == Dead -> return ()
 
+mainloop :: IORef World -> [Bitmap] -> Canvas -> IO ()
+mainloop ref bmps cv = void $ do
+  render cv . stroke $ circle (0,0) 0
+
+  forM_ [1..400] $ \i -> do
+    k <- randomRIO (0,600)
+    renderOnTop cv $ do
+      draw (bmps !! 2) (k,i)
+      -- stroke $ circle (k,i) 10
+
+  onceStateT ref $ do
+    ls <- use lives
+    forM_ (IM.keys ls) $ evolve
+
+  -- onceStateT ref $ do
+  --   globalCounter += 1
+  --
+  --   r <- use running
+  --   when r $ do
+  --     withElem "alife-num" $ \e -> do
+  --       s <- IM.size <$> use lives
+  --       setProp e "innerText" $ show s
+  --     withElem "alife-all-num" $ \e -> do
+  --       s <- last . IM.keys <$> use lives
+  --       setProp e "innerText" $ show s
+  --
+  --     ls <- use lives
+  --
+  --     forM_ (IM.keys ls) $ evolve
+  --     forM_ (IM.assocs ls) $ \(i,x) -> do
+  --       when (x^.condition == Dead) $ do
+  --         destruct i
+  --         lives %= IM.delete i
+  --
+  --     render cv $ do
+  --       forM_ (IM.assocs ls) $ \(i,x) -> do
+  --         let ps = M.fromList $ zip [Plant, Herbivore, Carnivore] [0..]
+  --         draw (bmps !! (ps M.! (x^.creature))) $ fromV2 $ x^.pos
+
+  requestAnimationFrame $ \p -> do
+    onceStateT ref $ do
+      t <- use timeStamp
+      r <- use running
+      when r $ do
+        withElem "fps" $ \e -> do
+          setProp e "innerText" $ show $ floor $ 1000 / (p - t)
+
+      timeStamp .= p
+
+    mainloop ref bmps cv
+
 main :: IO ()
 main = do
   Just cv <- getCanvasById "hakoniwa-canvas"
   bmps <- mapM loadBitmap ["img/creature0.png", "img/creature1.png", "img/creature2.png"]
 
   completeLoadBitmaps bmps $ do
-    ref <- newIORef $ World IM.empty Nothing [] 0 True
+    ref <- newIORef $ World IM.empty Nothing [] 0 True 0
 
     replicateM_ 50 $ onceStateT ref $ do
       p <- liftIO $ randomRIO (pure 0, windowSize)
@@ -362,42 +424,7 @@ main = do
       onEvent e Click $ \_ -> do
         onceStateT ref $ running .= False
 
-    let f0 = ffi $ toJSString "(function(){ return console.time('100times'); })" :: () -> IO ()
-    f0 ()
-
-    void $ setTimer (Repeat 20) $ void $ onceStateT ref $ do
-      globalCounter += 1
-
-      c <- use globalCounter
-      when (c == 100) $ liftIO $ do
-        let f1 = ffi $ toJSString "(function(){ return console.timeEnd('100times'); })" :: () -> IO ()
-        f1 ()
-
-      ps <- forM [0..4000] $ \_ -> randomRIO (0,windowSize)
-      let k = IM.fromList $ zip [0..] ps
-
-      render cv $ do
-        forM_ [0..400] $ \i -> do
-          draw (bmps !! 2) $ fromV2 $ k IM.! i
-
-      -- r <- use running
-      -- when r $ do
-      --   withElem "alife-num" $ \e -> do
-      --     s <- IM.size <$> use lives
-      --     setProp e "innerText" $ show s
-      --
-      --   ls <- use lives
-      --
-      --   forM_ (IM.keys ls) $ evolve
-      --   forM_ (IM.assocs ls) $ \(i,x) -> do
-      --     when (x^.condition == Dead) $ do
-      --       destruct i
-      --       lives %= IM.delete i
-      --
-      --   render cv $ do
-      --     forM_ (IM.assocs ls) $ \(i,x) -> do
-      --       let ps = M.fromList $ zip [Plant, Herbivore, Carnivore] [0..]
-      --       draw (bmps !! (ps M.! (x^.creature))) $ fromV2 $ x^.pos
+    mainloop ref bmps cv
 
 onceStateT :: IORef s -> StateT s IO a -> IO a
 onceStateT ref m = do
